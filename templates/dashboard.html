@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>블록체인 P2P 관제실</title>
+    <!-- Tailwind CSS 로드 -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .status-online { color: #28a745; }
+        .status-offline { color: #dc3545; }
+        .toast {
+            animation: fadeOut 5s forwards;
+        }
+        @keyframes fadeOut {
+            0%, 80% { opacity: 1; }
+            100% { opacity: 0; }
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 p-8 font-sans">
+
+    <!-- Flash 메시지 (알림창) -->
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            <div class="fixed top-5 right-5 z-50">
+            {% for category, message in messages %}
+                <div class="toast bg-{{ 'green' if category == 'success' else 'red' if category == 'danger' else 'blue' }}-600 text-white p-4 rounded-lg shadow-lg mb-2">
+                    {{ message }}
+                </div>
+            {% endfor %}
+            </div>
+        {% endif %}
+    {% endwith %}
+
+    <h1 class="text-4xl font-bold text-center mb-10 text-cyan-400">블록체인 P2P 관제실</h1>
+
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+        
+        <!-- 1. 노드 상태 패널 -->
+        <div class="lg:col-span-2 bg-gray-800 p-6 rounded-lg shadow-xl">
+            <h2 class="text-2xl font-semibold mb-6 border-b border-gray-700 pb-3">노드 상태 (Network Status)</h2>
+            <table class="w-full text-left">
+                <thead>
+                    <tr class="border-b border-gray-600">
+                        <th class="p-3">노드 (포트)</th>
+                        <th class="p-3">상태</th>
+                        <th class="p-3">체인 길이</th>
+                        <th class="p-3">대기 거래</th>
+                        <th class="p-3">작업 수행</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <!-- Flask에서 전달받은 'nodes' 리스트를 순회 -->
+                    {% for node in nodes %}
+                        <tr class="border-b border-gray-700 hover:bg-gray-700">
+                            <td class="p-3 font-mono">{{ node.url }}</td>
+                            <td class="p-3 font-bold">
+                                {% if node.online %}
+                                    <span class="status-online">● Online</span>
+                                {% else %}
+                                    <span class="status-offline">● Offline</span>
+                                {% endif %}
+                            </td>
+                            <td class="p-3 text-2xl font-mono text-yellow-400">{{ node.chain_length }}</td>
+                            <td class="p-3 text-2xl font-mono text-blue-400">{{ node.pending_tx_count }}</td>
+                            <td class="p-3 space-x-2">
+                                <!-- 
+                                  이 버튼은 대시보드 서버(8000)의 /mine/5000 같은 주소를 호출합니다.
+                                  그러면 대시보드 서버가 5000번 노드에게 /mine을 대신 요청합니다.
+                                -->
+                                <a href="{{ url_for('mine_on_node', port=node.url.split(':')[-1]) }}" class="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded text-sm {% if not node.online %} opacity-50 cursor-not-allowed {% endif %}">
+                                    채굴
+                                </a>
+                                <a href="{{ url_for('resolve_on_node', port=node.url.split(':')[-1]) }}" class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded text-sm {% if not node.online %} opacity-50 cursor-not-allowed {% endif %}">
+                                    동기화
+                                </a>
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <!-- 2. 거래 생성 패널 -->
+        <div class="bg-gray-800 p-6 rounded-lg shadow-xl">
+            <h2 class="text-2xl font-semibold mb-6 border-b border-gray-700 pb-3">새 거래 생성 (Broadcast)</h2>
+            <form action="{{ url_for('add_transaction') }}" method="POST" class="space-y-4">
+                <div>
+                    <label for="sender" class="block text-sm font-medium text-gray-400">송신자 (Sender)</label>
+                    <input type="text" id="sender" name="sender" class="w-full bg-gray-900 border border-gray-700 rounded-md p-2 mt-1 text-gray-100" value="Alice">
+                </div>
+                <div>
+                    <label for="recipient" class="block text-sm font-medium text-gray-400">수신자 (Recipient)</label>
+                    <input type="text" id="recipient" name="recipient" class="w-full bg-gray-900 border border-gray-700 rounded-md p-2 mt-1 text-gray-100" value="Bob">
+                </div>
+                <div>
+                    <label for="amount" class="block text-sm font-medium text-gray-400">금액 (Amount)</label>
+                    <input type="number" id="amount" name="amount" class="w-full bg-gray-900 border border-gray-700 rounded-md p-2 mt-1 text-gray-100" value="10">
+                </div>
+                <button type="submit" class="w-full bg-cyan-600 hover:bg-cyan-700 text-white font-bold p-3 rounded-md mt-4">
+                    거래 생성 및 전파
+                </button>
+            </form>
+        </div>
+
+    </div>
+
+</body>
+</html>
+
+```
+
+### 이 새로운 시스템을 사용하는 방법
+
+1.  **사전 준비:** `dashboard.py`가 `requests` 라이브러리를 사용하므로, `pip install requests`를 (이미 하셨겠지만) 확인합니다.
+2.  **폴더 구조:**
+    ```
+    /MyProject
+        |- blockchain_node_v3.py  (일꾼 노드)
+        |- dashboard.py           (관제실)
+        |- /templates
+            |- dashboard.html     (관제실 HTML)
