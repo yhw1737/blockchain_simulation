@@ -4,23 +4,23 @@ import json
 from time import time
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'my-secret-key'
+# 보안상의 이유로 SECRET_KEY가 필요합니다.
+app.config['SECRET_KEY'] = 'your-very-secret-key' 
 
-# 👈 [수정] 하드코딩된 리스트 대신, 동적으로 관리되는 집합(Set) 사용
-# (예: 'http://127.0.0.1:5000', 'http://127.0.0.1:5001')
+# 👈 [핵심] 하드코딩된 리스트 대신, 동적으로 관리되는 집합(Set) 사용
+# 이 집합에 'http://127.0.0.1:5000' 와 같은 노드 주소가 저장됩니다.
 known_nodes = set()
 
 @app.route('/')
 def index():
     """
     메인 대시보드 페이지.
-    현재 'known_nodes' 목록을 기준으로 모든 노드의 상태를 취합합니다.
+    'known_nodes' 목록을 기준으로 모든 노드의 상태를 취합하여 템플릿에 전달합니다.
     """
     node_states = []
-    offline_nodes = set() # 👈 [추가] 응답 없는 노드를 찾기 위함
+    offline_nodes = set() # 응답 없는 노드를 찾기 위함
 
-    # 👈 [수정] 하드코딩된 리스트 대신, 동적 집합을 사용
-    # (집합을 순회하는 동안 변경하면 오류가 나므로, 리스트로 복사해서 사용)
+    # 집합을 순회하는 동안 변경할 수 없으므로, 리스트로 복사해서 사용합니다.
     for node_url in list(known_nodes):
         state = {
             'url': node_url,
@@ -41,22 +41,23 @@ def index():
                 state['pending_tx_count'] = len(response_pending.json().get('transactions', []))
 
         except requests.exceptions.RequestException:
-            state['online'] = False # 연결 실패 시 오프라인
-            offline_nodes.add(node_url) # 👈 [추가] 응답 없는 노드를 목록에 추가
+            state['online'] = False
+            offline_nodes.add(node_url) # 응답 없는 노드를 목록에 추가
             
         node_states.append(state)
         
-    # 👈 [추가] 응답 없는 노드를 'known_nodes' 목록에서 제거 (자동 복구)
+    # 응답 없는 노드를 'known_nodes' 목록에서 제거 (자동 복구)
     if offline_nodes:
-        print(f"응답 없음: {offline_nodes} 노드를 목록에서 제거합니다.")
+        print(f"관제실: 응답 없음: {offline_nodes} 노드를 목록에서 제거합니다.")
         known_nodes.difference_update(offline_nodes)
         
     return render_template('dashboard.html', nodes=node_states)
 
-# --- (mine_on_node, resolve_on_node는 이전과 동일) ---
 @app.route('/mine/<port>')
 def mine_on_node(port):
-    # ... (이전과 동일) ...
+    """
+    특정 노드에게 채굴 명령을 내리고 결과를 플래시 메시지로 표시합니다.
+    """
     node_url = f"http://127.0.0.1:{port}"
     try:
         response = requests.get(f"{node_url}/mine")
@@ -66,11 +67,14 @@ def mine_on_node(port):
             flash(f"❌ {port}번 노드 채굴 실패. (서버 오류)", "danger")
     except requests.exceptions.RequestException:
         flash(f"❌ {port}번 노드에 연결할 수 없습니다.", "danger")
+        
     return redirect(url_for('index'))
 
 @app.route('/resolve/<port>')
 def resolve_on_node(port):
-    # ... (이전과 동일) ...
+    """
+    특정 노드에게 동기화(/nodes/resolve) 명령을 내립니다.
+    """
     node_url = f"http://127.0.0.1:{port}"
     try:
         response = requests.get(f"{node_url}/nodes/resolve")
@@ -81,42 +85,57 @@ def resolve_on_node(port):
             flash(f"❌ {port}번 노드 동기화 실패.", "danger")
     except requests.exceptions.RequestException:
         flash(f"❌ {port}번 노드에 연결할 수 없습니다.", "danger")
+        
     return redirect(url_for('index'))
 
 
 @app.route('/add_transaction', methods=['POST'])
 def add_transaction():
-    # 👈 [수정] 하드코딩된 리스트 대신, 'known_nodes' 집합에 전파
+    """
+    새로운 거래를 'known_nodes' 목록에 있는 모든 노드에게 전파합니다.
+    (노드들이 다시 이웃에게 전파하므로, 모든 노드가 받게 됩니다.)
+    """
     sender = request.form['sender']
     recipient = request.form['recipient']
     amount = request.form['amount']
+    
     if not sender or not recipient or not amount:
         flash("❌ 모든 필드를 입력해야 합니다.", "danger")
         return redirect(url_for('index'))
-    transaction = {'sender': sender, 'recipient': recipient, 'amount': int(amount), 'time': time()}
+
+    transaction = {
+        'sender': sender,
+        'recipient': recipient,
+        'amount': int(amount),
+        'time': time() # 고유성을 위한 타임스탬프
+    }
 
     success_count = 0
-    for node_url in list(known_nodes): # 👈 [수정]
+    # 모든 노드에게 이 거래를 전파
+    for node_url in list(known_nodes):
         try:
+            # 이웃에게 거래를 POST하면, 그 이웃이 다시 자신의 이웃에게 전파합니다. (Gossip)
             requests.post(f"{node_url}/transactions/new", json=transaction, timeout=0.5)
             success_count += 1
         except requests.exceptions.RequestException:
             pass 
+
     if success_count > 0:
-        flash(f"✅ 거래가 {success_count}개의 노드에 전송되었습니다.", "success")
+        flash(f"✅ 거래가 {success_count}개의 노드에 전송되었습니다. (Gossip 시작)", "success")
     else:
         flash("❌ 어떤 노드에도 거래를 전송하지 못했습니다. (모든 노드 오프라인?)", "danger")
+
     return redirect(url_for('index'))
 
-# --- 👈 [추가] 노드 등록 및 해제 API ---
+# --- 노드 등록 및 해제 API ---
 
 @app.route('/register', methods=['POST'])
 def register_new_node():
     """
-    새로운 노드가 실행될 때 호출하는 API.
-    1. 새 노드를 'known_nodes'에 추가합니다.
-    2. 기존 노드들에게 "새 친구가 왔어"라고 알려줍니다.
-    3. 새 노드에게 "기존 친구들 목록"을 반환합니다.
+    새로운 노드가 실행될 때 호출하는 API. (노드가 관제실에 스스로를 등록)
+    1. 기존 노드들에게 새 노드를 소개(add_peer)합니다.
+    2. 새 노드를 'known_nodes'에 추가합니다.
+    3. 새 노드에게 기존 노드 목록을 반환합니다.
     """
     values = request.get_json()
     port = values.get('port')
@@ -125,14 +144,13 @@ def register_new_node():
     
     new_node_url = f"http://127.0.0.1:{port}"
     
-    # 2. 기존 노드들에게 새 노드를 소개
-    existing_peers = list(known_nodes) # 👈 [수정] 복사본 사용
+    # 2. 기존 노드들에게 새 노드를 소개 (5000번에게 5001번을 이웃으로 등록 요청)
+    existing_peers = list(known_nodes) 
     for peer_url in existing_peers:
         try:
-            # "http://127.0.0.1:5000"에게 "http://127.0.0.1:5001"을 소개
             requests.post(f"{peer_url}/add_peer", json={'peer_url': new_node_url}, timeout=0.5)
         except requests.exceptions.RequestException:
-            pass # (실패해도 괜찮음, 나중에 /resolve로 복구 가능)
+            pass 
 
     # 1. 새 노드를 목록에 추가
     known_nodes.add(new_node_url)
@@ -152,10 +170,8 @@ def unregister_node():
         return "오류: 'port' 값이 누락되었습니다.", 400
         
     node_url = f"http://127.0.0.1:{port}"
-    known_nodes.discard(node_url) # 👈 집합에서 제거 (오류 없음)
+    known_nodes.discard(node_url) 
     print(f"관제실: {node_url} 노드 등록 해제. 현재 총 {len(known_nodes)}개 노드.")
-    
-    # (선택적) 다른 노드들에게 "걔 나갔어"라고 알려줄 수도 있음
     
     return "등록 해제 완료", 200
 

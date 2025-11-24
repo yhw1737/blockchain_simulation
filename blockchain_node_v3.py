@@ -6,9 +6,9 @@ from flask import Flask, jsonify, request
 import requests 
 from urllib.parse import urlparse
 import os
-import atexit # 👈 [추가] 종료 시 관제실에 알리기 위함
+import atexit
 
-# --- (하드코딩된 GENESIS_BLOCK은 이전과 동일) ---
+# --- (하드코딩된 GENESIS_BLOCK) ---
 GENESIS_MERKLE_ROOT = hashlib.sha256(json.dumps([], sort_keys=True).encode()).hexdigest()
 GENESIS_BLOCK = {
     'index': 1,
@@ -19,17 +19,17 @@ GENESIS_BLOCK = {
     'merkle_root': GENESIS_MERKLE_ROOT 
 }
 
-# 👈 [추가] 관제실 주소 (하드코딩)
+# 관제실 주소 (하드코딩)
 DASHBOARD_URL = 'http://127.0.0.1:8000'
 
 class Blockchain:
-    # ... (init, new_block, new_transaction, hash, last_block, proof_of_work, valid_proof ... 모두 동일) ...
     def __init__(self):
         self.chain = [GENESIS_BLOCK] 
         self.current_transactions = []
         self.nodes = set()
         
     def new_block(self, proof, previous_hash=None):
+        """정상적인 블록 생성 함수"""
         merkle_root = hashlib.sha256(json.dumps(self.current_transactions, sort_keys=True).encode()).hexdigest()
         block = {
             'index': len(self.chain) + 1,
@@ -42,6 +42,25 @@ class Blockchain:
         self.current_transactions = []
         self.chain.append(block)
         return block
+
+    def new_block_force(self, proof, previous_hash, transactions_to_include):
+        """
+        [추가] 이중 지불 공격 시뮬레이션을 위한, 대기 목록을 무시하고 특정 거래 목록으로
+        블록을 강제 생성하는 함수. (transactions_to_include가 공격 거래를 담고 있음)
+        """
+        merkle_root = hashlib.sha256(json.dumps(transactions_to_include, sort_keys=True).encode()).hexdigest()
+        block = {
+            'index': len(self.chain) + 1,
+            'timestamp': time(),
+            'transactions': transactions_to_include,
+            'proof': proof,
+            'previous_hash': previous_hash or self.hash(self.last_block),
+            'merkle_root': merkle_root 
+        }
+        # 이 함수는 self.current_transactions를 건드리지 않음
+        self.chain.append(block)
+        return block
+
 
     def new_transaction(self, transaction):
         tx_to_store = transaction.copy() 
@@ -105,21 +124,18 @@ class Blockchain:
             previous_block = current_block
             block_index += 1
         
-        # [수정] 성공 시 너무 많은 로그를 찍지 않도록 함
-        # print(f"✅ 체인 검증 성공 (길이: {len(chain)})")
         return True
 
     def register_node(self, address):
         parsed_url = urlparse(address)
         if parsed_url.netloc:
-            self.nodes.add(parsed_url.netloc) # '127.0.0.1:5001'
+            self.nodes.add(parsed_url.netloc)
         elif parsed_url.path:
             self.nodes.add(parsed_url.path)
         else:
             raise ValueError('잘못된 URL입니다.')
 
     def resolve_conflicts(self):
-        # ... (이전과 동일) ...
         neighbours = self.nodes
         new_chain = None
         max_length = len(self.chain)
@@ -147,7 +163,6 @@ class Blockchain:
             json.dump(self.chain, f, indent=4, ensure_ascii=False)
 
     def load_chain_from_json(self, port):
-        # ... (이전과 동일) ...
         filepath = f"blockchain_{port}.json"
         if os.path.exists(filepath):
             try:
@@ -171,31 +186,68 @@ app = Flask(__name__)
 node_identifier = str(uuid4()).replace('-', '')
 blockchain = Blockchain() 
 
-# --- (API 엔드포인트: mine, new_transaction, receive_block, chain, pending, resolve ... 모두 동일) ---
+# --- API 엔드포인트: mine, new_transaction, receive_block, chain, pending, resolve ---
 @app.route('/mine', methods=['GET'])
 def mine():
-    # ... (이전과 동일) ...
     last_block = blockchain.last_block
     last_proof = last_block['proof']
     proof = blockchain.proof_of_work(last_proof)
+
     reward_transaction = {
         "sender": "0", "recipient": node_identifier, "amount": 1, "time": time() 
     }
     blockchain.new_transaction(reward_transaction)
+
     previous_hash = blockchain.hash(last_block)
     block = blockchain.new_block(proof, previous_hash)
     blockchain.save_chain_to_json()
+
     for node in blockchain.nodes:
         try:
             requests.post(f'http://{node}/blocks/receive', json=block)
         except requests.exceptions.RequestException:
             print(f"[{app.config['PORT']}번 노드] 노드 {node}에게 블록 전파 실패")
-    response = {'message': "새로운 블록 채굴 성공!", 'block': block}
+
+    response = {
+        'message': "새로운 블록 채굴 성공!",
+        'block': block
+    }
     return jsonify(response), 200
+
+# 👈 [추가] 이중 지불 공격 API 엔드포인트
+@app.route('/mine_fork', methods=['POST'])
+def mine_fork():
+    """
+    [추가] 공격용 블록 생성 API. 대기 목록을 무시하고, 요청에 담긴 거래만으로 블록을 생성합니다.
+    """
+    values = request.get_json()
+    transactions = values.get('transactions', [])
+    
+    last_block = blockchain.last_block
+    last_proof = last_block['proof']
+    proof = blockchain.proof_of_work(last_proof)
+
+    # 채굴 보상 추가 (공격자는 자기 보상은 챙김)
+    reward_transaction = {"sender": "0", "recipient": node_identifier, "amount": 1, "time": time()}
+    transactions.append(reward_transaction)
+
+    previous_hash = blockchain.hash(last_block)
+    
+    # 강제 블록 생성
+    block = blockchain.new_block_force(proof, previous_hash, transactions)
+    blockchain.save_chain_to_json()
+    
+    # 이 블록은 공격용이므로, 네트워크에 전파하지 않음 (비밀 체인)
+
+    response = {
+        'message': "공격용 블록 채굴 성공 (비밀리에 저장됨)",
+        'block': block
+    }
+    return jsonify(response), 200
+
 
 @app.route('/transactions/new', methods=['POST'])
 def new_transaction():
-    # ... (이전과 동일) ...
     values = request.get_json()
     required = ['sender', 'recipient', 'amount', 'time'] 
     if not all(k in values for k in required):
@@ -217,47 +269,50 @@ def new_transaction():
 
 @app.route('/blocks/receive', methods=['POST'])
 def receive_block():
-    # ... (이전과 동일) ...
     new_block = request.get_json()
     last_block = blockchain.last_block
+    
     if new_block['previous_hash'] != blockchain.hash(last_block):
         if new_block['index'] > last_block['index'] + 1:
             print(f"[{app.config['PORT']}번 노드] 수신한 블록 #{new_block['index']}이 내 체인보다 너무 깁니다. 전체 동기화(/resolve)가 필요합니다.")
             return "체인 동기화 필요", 409
         return "오류: 블록의 previous_hash가 일치하지 않습니다.", 400
+        
     if not blockchain.valid_proof(last_block['proof'], new_block['proof']):
         return "오류: 블록의 작업 증명이 유효하지 않습니다.", 400
+        
     if new_block['index'] <= last_block['index']:
         return "이미 최신 블록을 가지고 있습니다.", 200
+
     tx_hash_check = hashlib.sha256(json.dumps(new_block['transactions'], sort_keys=True).encode()).hexdigest()
     if new_block.get('merkle_root') != tx_hash_check:
         return "오류: 수신한 블록의 거래 내역(merkle_root)이 조작되었습니다.", 400
+
     new_tx_list = [json.dumps(tx, sort_keys=True) for tx in new_block['transactions']]
     temp_transactions = []
     for tx in blockchain.current_transactions:
         if json.dumps(tx, sort_keys=True) not in new_tx_list:
             temp_transactions.append(tx)
     blockchain.current_transactions = temp_transactions
+    
     blockchain.chain.append(new_block)
     blockchain.save_chain_to_json()
+    
     print(f"[{app.config['PORT']}번 노드] 🎉 블록 #{new_block['index']}을(를) 네트워크로부터 수신 및 동기화했습니다.")
     return "블록 수신 완료", 201
 
 @app.route('/chain', methods=['GET'])
 def full_chain():
-    # ... (이전과 동일) ...
     response = {'chain': blockchain.chain, 'length': len(blockchain.chain)}
     return jsonify(response), 200
 
 @app.route('/transactions/pending', methods=['GET'])
 def get_pending_transactions():
-    # ... (이전과 동일) ...
     response = {'message': '현재 대기 중인 트랜잭션 목록', 'transactions': blockchain.current_transactions}
     return jsonify(response), 200
 
 @app.route('/nodes/resolve', methods=['GET'])
 def consensus():
-    # ... (이전과 동일) ...
     replaced = blockchain.resolve_conflicts()
     if replaced:
         response = {'message': '체인이 교체되었습니다. (더 긴 체인 발견)', 'new_chain': blockchain.chain}
@@ -265,7 +320,6 @@ def consensus():
         response = {'message': '현재 체인이 가장 최신입니다.', 'chain': blockchain.chain}
     return jsonify(response), 200
 
-# 👈 [추가] 관제실이 "새 이웃이 왔어"라고 알려줄 API
 @app.route('/add_peer', methods=['POST'])
 def add_peer():
     values = request.get_json()
@@ -273,7 +327,6 @@ def add_peer():
     if not peer_url:
         return "오류: 'peer_url'이 누락되었습니다.", 400
         
-    # urlparse를 통해 '127.0.0.1:5002' 형식으로 저장
     parsed_url = urlparse(peer_url)
     blockchain.register_node(peer_url)
     print(f"[{app.config['PORT']}번 노드] 관제실로부터 새 이웃 {parsed_url.netloc} 을(를) 소개받았습니다.")
@@ -290,23 +343,18 @@ if __name__ == '__main__':
     
     app.config['PORT'] = port 
     
-    # 👈 [수정] 내 주소 정의
     my_url = f"http://127.0.0.1:{port}" 
     
     blockchain.load_chain_from_json(port) 
     
-    # 👈 [수정] ALL_PEERS 리스트 제거
-    
-    # 👈 [추가] 프로그램 종료 시 관제실에 등록 해제 요청
     @atexit.register
     def unregister_from_dashboard():
         print(f"[{port}번 노드] 종료 중... 관제실에 등록 해제를 요청합니다.")
         try:
             requests.post(f"{DASHBOARD_URL}/unregister", json={'port': port}, timeout=1)
         except requests.exceptions.RequestException:
-            pass # 관제실이 꺼져있어도 상관없음
+            pass 
 
-    # 👈 [수정] 서버 시작 시, 관제실에 자신을 등록하고 이웃 목록을 받아옴
     try:
         print(f"[{port}번 노드] 관제실({DASHBOARD_URL})에 등록을 시도합니다...")
         response = requests.post(f"{DASHBOARD_URL}/register", json={'port': port}, timeout=2)
@@ -322,7 +370,6 @@ if __name__ == '__main__':
     except requests.exceptions.RequestException:
         print(f"[{port}번 노드] 관제실({DASHBOARD_URL})에 연결할 수 없습니다. 독립 모드로 실행합니다.")
 
-    # 👈 [수정] 관제실에서 이웃을 받아온 후, 동기화 시도
     if blockchain.nodes:
         print(f"[{port}번 노드] 서버 시작 전, 네트워크 동기화를 시도합니다...")
         replaced = blockchain.resolve_conflicts()
